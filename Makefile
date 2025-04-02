@@ -11,7 +11,7 @@ MANDIR	?= $(PREFIX)/man/man1
 INSTALL_PROGRAM ?= install -s
 INSTALL_DATA ?= install
 
-LIBS	?= x11 xfixes xi xext
+LIBS	?= x11 xfixes xi
 INCLUDES?= `pkg-config --cflags $(LIBS)`
 LDFLAGS	+= `pkg-config --libs $(LIBS)`
 
