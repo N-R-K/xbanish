@@ -16,7 +16,10 @@
  */
 
 #include <err.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,6 +41,7 @@ void snoop_legacy(Window);
 void usage(char *);
 int swallow_error(Display *, XErrorEvent *);
 int parse_geometry(const char *s);
+void sighandler(int);
 
 /* xinput event type ids to be filled in later */
 static int button_press_type = -1;
@@ -53,6 +57,7 @@ static int hiding = 0, legacy = 0, always_hide = 0, ignore_scroll = 0;
 static time_t timeout = 0;
 static time_t timeout_at = 0;
 static unsigned char ignored;
+static int sigpipe[2];
 
 static int debug = 0;
 #define DPRINTF(x) { if (debug) { printf x; } };
@@ -143,6 +148,15 @@ main(int argc, char *argv[])
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "can't open display %s", XDisplayName(NULL));
 
+	if (pipe(sigpipe) < 0)
+		err(1, "pipe");
+	if (fcntl(sigpipe[1], F_SETFD, O_NONBLOCK) < 0)
+		err(1, "fcntl");
+	struct sigaction sa = { .sa_handler = sighandler };
+	sigemptyset(&sa.sa_mask);
+	if (sigaction(SIGTERM, &sa, NULL) < 0)
+		err(1, "sigaction");
+
 #ifdef __OpenBSD__
 	if (pledge("stdio", NULL) == -1)
 		err(1, "pledge");
@@ -156,20 +170,29 @@ main(int argc, char *argv[])
 		hide_cursor();
 
 	for (;;) {
+		struct pollfd pfd[2] = {0};
 		int pending = XPending(dpy) > 0;
 		if (!pending) {
 			int poll_timeout = -1;
-			struct pollfd pfd;
-			pfd.fd = ConnectionNumber(dpy);
-			pfd.events = POLLIN;
+			pfd[0].fd = ConnectionNumber(dpy);
+			pfd[0].events = POLLIN;
+			pfd[1].fd = sigpipe[0];
+			pfd[1].events = POLLIN;
 			if (timeout && !hiding) {
 				poll_timeout = (timeout_at - time(NULL)) * 1000;
 				if (poll_timeout < 0)
 					poll_timeout = 0;
 			}
 			DPRINTF(("poll_timeout: %d\n", poll_timeout));
-			pending = poll(&pfd, 1, poll_timeout) > 0 &&
-				(pfd.revents & POLLIN);
+			pending = poll(pfd, 2, poll_timeout) > 0 &&
+				(pfd[0].revents & POLLIN);
+		}
+
+		if (pfd[1].revents & POLLIN) {
+			DPRINTF(("received signal, exiting...\n"));
+			if (hiding)
+				show_cursor();
+			break;
 		}
 
 		if (timeout && !hiding && time(NULL) >= timeout_at) {
@@ -285,6 +308,7 @@ main(int argc, char *argv[])
 			break;
 		}
 	}
+	XCloseDisplay(dpy);
 }
 
 void
@@ -586,4 +610,14 @@ parse_geometry(const char *s)
 		return 1;
 	}
 	return 0;
+}
+
+void
+sighandler(int signum)
+{
+	char dummy = 1;
+	int saved_errno = errno;
+	ssize_t res = write(sigpipe[1], &dummy, 1);
+	(void)res;
+	errno = saved_errno;
 }
