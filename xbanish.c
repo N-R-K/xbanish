@@ -278,26 +278,53 @@ main(int argc, char *argv[])
 			break;
 
 		case GenericEvent:
-			/* xi2 raw event */
-			XGetEventData(dpy, cookie);
-			XIDeviceEvent *xie = (XIDeviceEvent *)cookie->data;
+			if (!XGetEventData(dpy, cookie))
+				break;
 
-			switch (xie->evtype) {
-			case XI_RawMotion:
-			case XI_RawButtonPress:
-				if (ignore_scroll && ((xie->detail >= 4 && xie->detail <= 7) ||
-						xie->event_x == xie->event_y))
+			switch (cookie->evtype) {
+			case XI_RawMotion: {
+				XIRawEvent *raw = (XIRawEvent *)cookie->data;
+
+				(void)raw;
+				if (!always_hide)
+					show_cursor();
+				break;
+			}
+
+			case XI_RawButtonPress: {
+				XIRawEvent *raw = (XIRawEvent *)cookie->data;
+
+				if (ignore_scroll && raw->detail >= 4 && raw->detail <= 7)
 					break;
 				if (!always_hide)
 					show_cursor();
 				break;
+			}
 
 			case XI_RawButtonRelease:
 				break;
 
+			case XI_RawKeyPress:
+				hide_cursor();
+				break;
+
+			case XI_RawKeyRelease:
+				break;
+
+			case XI_KeyPress:
+			case XI_KeyRelease: {
+				XIDeviceEvent *xie = (XIDeviceEvent *)cookie->data;
+
+				if (ignored && (xie->mods.effective & ignored))
+					break;
+
+				hide_cursor();
+				break;
+			}
+
 			default:
 				DPRINTF(("unknown XI event type %d\n",
-				    xie->evtype));
+				    cookie->evtype));
 			}
 
 			XFreeEventData(dpy, cookie);
@@ -438,19 +465,18 @@ snoop_xinput(Window win)
 	}
 
 	/*
-	 * If we support xinput 2, use that for raw motion and button events to
-	 * get pointer data when the cursor is over a Chromium window.  We
-	 * could also use this to get raw key input and avoid the other XInput
-	 * stuff, but we may need to be able to examine the key value later to
-	 * filter out ignored keys.
+	 * If we support xinput 2, use that for raw pointer activity and
+	 * keyboard events.  Otherwise keep the older XInput1 snooping path.
 	 */
 	major = minor = 2;
 	rc = XIQueryVersion(dpy, &major, &minor);
-	if (rc != BadRequest) {
+	if (rc == Success) {
 		memset(mask, 0, sizeof(mask));
 
 		XISetMask(mask, XI_RawMotion);
 		XISetMask(mask, XI_RawButtonPress);
+		XISetMask(mask, XI_RawKeyPress);
+		XISetMask(mask, XI_RawKeyRelease);
 		evmasks[0].deviceid = XIAllMasterDevices;
 		evmasks[0].mask_len = sizeof(mask);
 		evmasks[0].mask = mask;
@@ -459,14 +485,16 @@ snoop_xinput(Window win)
 		XFlush(dpy);
 
 		rawmotion = 1;
+		ev = 1;
 
-		DPRINTF(("using xinput2 raw motion events\n"));
+		DPRINTF(("using xinput2 raw motion and key events\n"));
 	}
 
 	devinfo = XListInputDevices(dpy, &numdevs);
 	XEventClass event_list[numdevs * 2];
-	for (i = 0; i < numdevs; i++) {
+	for (i = 0; !rawmotion && i < numdevs; i++) {
 		if (devinfo[i].use != IsXExtensionKeyboard &&
+		    devinfo[i].use != IsXKeyboard &&
 		    devinfo[i].use != IsXExtensionPointer)
 			continue;
 
@@ -485,6 +513,8 @@ snoop_xinput(Window win)
 				    event_list[ev]); ev++;
 				DeviceKeyRelease(device, key_release_type,
 				    event_list[ev]); ev++;
+				DPRINTF(("selected key types for %s: press=%d release=%d\n",
+				    devinfo[i].name, key_press_type, key_release_type));
 				break;
 
 			case ButtonClass:
@@ -533,7 +563,7 @@ snoop_xinput(Window win)
 
 done:
 	if (devinfo != NULL)
-	   XFreeDeviceList(devinfo);
+		XFreeDeviceList(devinfo);
 
 	return ev;
 }
